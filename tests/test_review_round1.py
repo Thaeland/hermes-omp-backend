@@ -95,7 +95,7 @@ def test_truncated_transfer_is_flagged(plugin, tmp_path, monkeypatch):
     out = _marker_output(plugin, monkeypatch)
 
     def req(m, t, **p):
-        if "dd if=" in p.get("command", ""):
+        if "tail -c +" in p.get("command", ""):
             return {"output": "", "exitCode": 0}  # chunk lost
         return {"output": out, "exitCode": 0}
 

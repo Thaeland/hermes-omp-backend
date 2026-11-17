@@ -87,6 +87,14 @@ def _drain_stderr(proc, sink=None) -> None:
         pass
 
 
+IS_WINDOWS = os.name == "nt"
+
+# Windows process-creation flags (numeric: the subprocess attributes only
+# exist on Windows, but tests monkeypatch IS_WINDOWS on any platform).
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NO_WINDOW = 0x08000000
+
+
 class _OmpRpcError(RuntimeError):
     pass
 
@@ -139,17 +147,28 @@ class OmpRpcEnvironment:
             logger.warning("omp backend: cwd %r is not an accessible directory; "
                            "spawning in %s instead", self.cwd, fallback)
             self.cwd = fallback
-        cmd = ["omp", "--mode", "rpc", "--no-ui", "--no-session",
+        omp_bin = shutil.which("omp") or "omp"
+        cmd = [omp_bin, "--mode", "rpc", "--no-ui", "--no-session",
                "--config", self._overlay_path]
+        if omp_bin.lower().endswith((".cmd", ".bat")):
+            # npm on Windows installs .cmd shims, which CreateProcess
+            # cannot launch directly.
+            cmd = ["cmd", "/c"] + cmd
         if self._model:
             cmd += ["--model", self._model]
         self._ready.clear()
+        popen_kwargs: dict = dict(
+            cwd=self.cwd,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        if IS_WINDOWS:
+            popen_kwargs["creationflags"] = (_CREATE_NEW_PROCESS_GROUP
+                                             | _CREATE_NO_WINDOW)
+        else:
+            popen_kwargs["start_new_session"] = True
         try:
-            self._process = subprocess.Popen(
-                cmd, cwd=self.cwd,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1, start_new_session=True,
-            )
+            self._process = subprocess.Popen(cmd, **popen_kwargs)
         except OSError as e:
             # A wiped npm prefix (e.g. after `hermes update`) lands here as
             # FileNotFoundError; a cli.ts that lost its exec bit lands here as
@@ -294,6 +313,18 @@ class OmpRpcEnvironment:
     def _kill_process(self) -> None:
         proc = self._process
         if proc is None:
+            return
+        if IS_WINDOWS:
+            # No POSIX process groups: taskkill the whole tree.
+            try:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True)
+            except Exception:
+                proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
             return
         try:
             os.killpg(os.getpgid(proc.pid), 15)
@@ -446,8 +477,11 @@ class OmpRpcEnvironment:
                 block = 0
                 while offset < b64_total:
                     block += 1
-                    chunk_cmd = (f"dd if={json.dumps(b64_file)} bs={_INLINE_B64_BYTES} "
-                                 f"skip={block} count=1 2>/dev/null")
+                    # tail|head instead of dd: dd is absent from omp's
+                    # embedded shell utilities (pi-builtins), so the
+                    # portable form also makes the wrapper Windows-ready.
+                    chunk_cmd = (f"tail -c +{block * _INLINE_B64_BYTES + 1} "
+                                 f"{json.dumps(b64_file)} | head -c {_INLINE_B64_BYTES}")
                     try:
                         cdata = self._request("bash", 60, command=chunk_cmd)
                     except (_OmpRpcError, TimeoutError):
