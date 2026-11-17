@@ -14,14 +14,34 @@ Hermes keeps its own approval guards — this is a same-host backend
 hermes plugins install Thaeland/hermes-omp-backend
 ```
 
-Requires the `omp` CLI on `PATH`:
+Requires the `omp` CLI on `PATH`. Any official install method works — the
+plugin speaks omp's RPC protocol (≥ 17.0.9), not npm:
 
 ```bash
+# official installer (macOS/Linux) — self-contained, no bun needed
+curl -fsSL https://omp.sh/install | sh
+
+# or via npm/bun (needs bun reachable for the launcher, and postinstall
+# scripts allowed: npm i -g --allow-scripts=omp,bun @oh-my-pi/pi-coding-agent bun)
 npm install -g @oh-my-pi/pi-coding-agent bun
 ```
 
-(`bun` is needed by omp's launcher. omp also needs a model configured —
-`~/.omp/agent/models.yml` or run `omp` once.)
+A source build (`git clone` + `bun install`) works too — this backend was
+developed against one. `npx`/`bunx` ephemeral runs do NOT work: the plugin
+spawns `omp` by name, so it must be a stable binary on `PATH`.
+
+Two PATH caveats:
+- **Gateway visibility:** Hermes serving processes (e.g. systemd user
+  services) snapshot `PATH` at boot. The installer's "add to PATH"
+  instruction fixes your interactive shell, not the service — make sure the
+  directory holding `omp` is on the *service's* PATH (a symlink into
+  `~/.local/bin` is the robust fix), then restart the gateway.
+- **Windows:** not supported. The command wrapper assumes a POSIX shell
+  (`bash`, `dd`, `base64 -w0`). macOS is untested and needs GNU coreutils
+  (`base64 -w0` is GNU-only); Linux is the tested platform.
+
+omp also needs a model configured — `~/.omp/agent/models.yml`, provider
+sign-in, or run `omp` once interactively.
 
 **omp version compatibility:** tested continuously across omp 18.4.3 →
 18.22.0 (the whole 18.x line this backend has run in production). The floor
