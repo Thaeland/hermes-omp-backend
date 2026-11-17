@@ -62,6 +62,31 @@ def _usable_cwd(path: str) -> bool:
     return bool(path) and os.path.isdir(path) and os.access(path, os.R_OK | os.X_OK)
 
 
+def _sh_squote(s: str) -> str:
+    """POSIX single-quote escape — the only safe way to embed an arbitrary
+    string (cwd, paths) in a shell script. Shell double quotes (what
+    json.dumps produces) still expand ``$()``, backticks and ``$VAR``."""
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _drain_stderr(proc, sink=None) -> None:
+    """Read ``proc.stderr`` to EOF so the OS pipe never fills up (classic
+    subprocess pipe-full deadlock: omp blocks on its next stderr write and
+    the whole RPC stream wedges). When a sink list is given, keeps roughly
+    the last 16 KB for startup-error reporting."""
+    try:
+        while True:
+            chunk = proc.stderr.read(4096)
+            if not chunk:
+                break
+            if sink is not None:
+                sink.append(chunk)
+                if sum(map(len, sink)) > 16384:
+                    del sink[:-2]
+    except Exception:
+        pass
+
+
 class _OmpRpcError(RuntimeError):
     pass
 
@@ -77,9 +102,12 @@ class OmpRpcEnvironment:
         self._lock = threading.Lock()          # serialize commands (abort_bash is global)
         self._write_lock = threading.Lock()
         self._ids = itertools.count()
-        self._pending: Dict[str, threading.Event] = {}
+        self._gen = 0
+        self._closed = False
+        self._pending: Dict[str, tuple] = {}
         self._responses: Dict[str, dict] = {}
         self._chunks: Dict[str, dict] = {}
+        self._stderr_tail: list = []
         self._ready = threading.Event()
         self._process: Optional[subprocess.Popen] = None
         self._overlay_path: Optional[str] = None
@@ -87,6 +115,9 @@ class OmpRpcEnvironment:
 
     # --- process lifecycle -------------------------------------------------
     def _spawn(self) -> None:
+        if self._closed:
+            return  # teardown won the race; never resurrect a closed env
+        self._gen += 1
         if self._overlay_path is None:
             fd, self._overlay_path = tempfile.mkstemp(prefix="hermes-omp-cfg-", suffix=".yml")
             with os.fdopen(fd, "w") as f:
@@ -111,11 +142,20 @@ class OmpRpcEnvironment:
             # A wiped npm prefix (e.g. after `hermes update`) lands here. A
             # bare FileNotFoundError at tool dispatch blinds every execution
             # path with an opaque traceback; name the fix instead.
+            if self._overlay_path:
+                try:
+                    os.unlink(self._overlay_path)
+                except OSError:
+                    pass
+                self._overlay_path = None
             raise _OmpRpcError(
                 "omp binary not found on PATH — install it with "
                 "`npm install -g @oh-my-pi/pi-coding-agent bun` (then restart "
                 "the Hermes gateway: the terminal tool registers at boot)"
             ) from e
+        self._stderr_tail = []
+        threading.Thread(target=_drain_stderr,
+                         args=(self._process, self._stderr_tail), daemon=True).start()
         threading.Thread(target=self._read_loop, daemon=True).start()
         deadline = time.time() + _READY_TIMEOUT
         while time.time() < deadline:
@@ -124,7 +164,8 @@ class OmpRpcEnvironment:
             if self._process.poll() is not None:
                 err = ""
                 try:
-                    err = (self._process.stderr.read() or "")[:500]
+                    time.sleep(0.1)  # let the stderr drain reach EOF
+                    err = "".join(self._stderr_tail)[:500]
                 except Exception:
                     pass
                 raise _OmpRpcError(f"omp exited at startup (rc={self._process.returncode}): {err}")
@@ -133,6 +174,7 @@ class OmpRpcEnvironment:
     def _read_loop(self) -> None:
         proc = self._process
         assert proc is not None and proc.stdout is not None
+        gen = self._gen
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -152,10 +194,16 @@ class OmpRpcEnvironment:
             rid = msg.get("id")
             if rid and rid in self._pending:
                 self._responses[rid] = msg
-                self._pending[rid].set()
-        # stdout closed: fail every waiter
-        for rid, ev in list(self._pending.items()):
-            self._responses.setdefault(rid, {"success": False, "error": "omp RPC stream closed"})
+                self._pending[rid][1].set()
+        # stdout closed: fail waiters of THIS spawn generation only — a
+        # stale loop must never poison requests registered after respawn.
+        self._fail_all_pending(gen, "omp RPC stream closed")
+
+    def _fail_all_pending(self, gen: int, reason: str) -> None:
+        for rid, (egen, ev) in list(self._pending.items()):
+            if egen != gen:
+                continue
+            self._responses.setdefault(rid, {"success": False, "error": reason})
             ev.set()
 
     def _handle_chunk(self, msg: dict) -> None:
@@ -164,6 +212,9 @@ class OmpRpcEnvironment:
         if not cid:
             return
         state = self._chunks.setdefault(cid, {"parts": {}, "count": msg.get("count")})
+        if len(self._chunks) > 64:  # bound: incomplete streams must not accumulate
+            for stale in list(self._chunks)[: len(self._chunks) - 64]:
+                self._chunks.pop(stale, None)
         idx, data = msg.get("index"), msg.get("data")
         if not isinstance(idx, int) or not isinstance(data, str):
             return
@@ -180,7 +231,7 @@ class OmpRpcEnvironment:
             if isinstance(full, dict) and full.get("id") in self._pending:
                 rid = full["id"]
                 self._responses[rid] = full
-                self._pending[rid].set()
+                self._pending[rid][1].set()
 
     def _send(self, obj: dict) -> None:
         proc = self._process
@@ -193,7 +244,7 @@ class OmpRpcEnvironment:
     def _request(self, cmd_type: str, timeout: float, **payload: Any) -> dict:
         rid = f"h{next(self._ids)}"
         ev = threading.Event()
-        self._pending[rid] = ev
+        self._pending[rid] = (self._gen, ev)
         try:
             self._send({"id": rid, "type": cmd_type, **payload})
             if not ev.wait(timeout):
@@ -210,6 +261,8 @@ class OmpRpcEnvironment:
                 stdin_data: Optional[str] = None, **kwargs: Any) -> dict:
         effective_timeout = timeout or self.timeout
         effective_cwd = cwd or self.cwd
+        if self._closed:
+            raise _OmpRpcError("omp environment is closed (cleanup already ran)")
         with self._lock:
             try:
                 return self._execute_locked(command, effective_cwd, effective_timeout, stdin_data)
@@ -219,6 +272,8 @@ class OmpRpcEnvironment:
                 return self._execute_locked(command, effective_cwd, effective_timeout, stdin_data)
 
     def _restart(self) -> None:
+        if self._closed:
+            return
         self._kill_process()
         self._spawn()
 
@@ -312,7 +367,7 @@ class OmpRpcEnvironment:
             # `exit` would terminate omp's persistent session shell and wipe
             # env vars for every later command (probed on 18.4.3).
             wrapped = (
-                f"if cd {json.dumps(cwd)} 2>/dev/null; then\n"
+                f"if cd {_sh_squote(cwd)} 2>/dev/null; then\n"
                 f"{{\n{command}\n}} > {json.dumps(spool)} 2>&1{stdin_redir} ; __rc=$?\n"
                 f"base64 -w0 {json.dumps(spool)} > {json.dumps(b64_file)}\n"
                 f"printf '\\n{size_marker}%s{size_marker}\\n' \"$(wc -c < {json.dumps(b64_file)})\"\n"
@@ -321,7 +376,7 @@ class OmpRpcEnvironment:
                 f"if [ $__rc -ne 0 ]; then (exit $__rc); fi\n"
                 f"else\n"
                 f"printf 'omp backend: requested working directory %s is not accessible; "
-                f"command was not run\\n' {json.dumps(cwd)}\n"
+                f"command was not run\\n' {_sh_squote(cwd)}\n"
                 f"printf '\\n{cwd_marker}%s\\n' \"$(pwd)\"\n"
                 f"(exit 2)\n"
                 f"fi"
@@ -388,10 +443,22 @@ class OmpRpcEnvironment:
                         break
                     b64_parts.append(piece)
                     offset += len(piece)
+                truncated = offset < b64_total
                 try:
                     output = base64.b64decode("".join(b64_parts)).decode("utf-8", errors="replace")
                 except Exception:
-                    output = raw_inline  # last resort: whatever inline survived
+                    # Last resort: decode the inline head alone (trimmed to a
+                    # whole base64 group) — never hand back undecoded b64.
+                    truncated = True
+                    head = b64_parts[0]
+                    head = head[: len(head) - len(head) % 4]
+                    try:
+                        output = base64.b64decode(head).decode("utf-8", errors="replace")
+                    except Exception:
+                        output = ""
+                if truncated:
+                    output += (f"\n[omp backend: output truncated — received "
+                               f"{offset} of {b64_total} base64 bytes]")
             else:
                 output = raw_inline
 
@@ -411,6 +478,9 @@ class OmpRpcEnvironment:
                         pass
 
     def cleanup(self) -> None:
+        # Set the flag BEFORE killing: a concurrent execute() must not
+        # respawn the process after teardown (see _restart/_spawn guards).
+        self._closed = True
         self._kill_process()
         self._process = None
         if self._overlay_path:

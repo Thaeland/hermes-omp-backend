@@ -9,12 +9,14 @@ description: >
   code tools run each Hermes task's commands through one long-lived
   `omp --mode rpc` session shell on this host, with lossless output transfer
   past omp's inline caps. Select it with `terminal.backend: omp`.
-  Disclosure — no Python dependencies and no network calls of its own: it
+  Disclosure — no Python dependencies and no network calls of its own (the
+  spawned omp CLI may reach the model provider you configured for omp): it
   drives the `omp` CLI you install yourself
   (`npm install -g @oh-my-pi/pi-coding-agent bun`), spawns one long-lived
-  `omp --mode rpc` process per Hermes task, and spools command output through
-  temp files under your scratch directory (plus a live-observation log at
-  `~/.hermes/omp-live/`) so large outputs survive intact.
+  `omp --mode rpc` process per Hermes task, and spools command output, a
+  per-env config overlay and optional stdin through temp files under your
+  scratch directory (plus a live-observation log at `~/.hermes/omp-live/`)
+  so large outputs survive intact.
 requires_hermes: ">=0.21.6"
 provides_tools: []
 provides_hooks: []

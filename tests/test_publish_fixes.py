@@ -44,21 +44,28 @@ def _make_env(plugin, tmp_path):
 
 
 def test_cwd_marker_rejects_inaccessible_dir(plugin, tmp_path, monkeypatch):
-    """/root is a directory but not enterable by the gateway user: the
-    marker must be rejected and the session cwd left untouched."""
-    assert os.path.isdir("/root") and not os.access("/root", os.R_OK | os.X_OK)
+    """A directory that exists but the gateway user cannot enter must be
+    rejected and the session cwd left untouched."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    os.chmod(locked, 0)
+    try:
+        if os.access(locked, os.R_OK | os.X_OK):
+            pytest.skip("cannot create an inaccessible dir for this user")
 
-    seq = iter([_FakeUUID("a" * 32), _FakeUUID("b" * 32)])
-    monkeypatch.setattr(plugin.uuid, "uuid4", lambda: next(seq))
-    cwd_marker = f"__OMPCW_{'b' * 12}__"
+        seq = iter([_FakeUUID("a" * 32), _FakeUUID("b" * 32)])
+        monkeypatch.setattr(plugin.uuid, "uuid4", lambda: next(seq))
+        cwd_marker = f"__OMPCW_{'b' * 12}__"
 
-    env = _make_env(plugin, tmp_path)
-    env._request = lambda *a, **k: {"output": f"some output\n{cwd_marker}/root\n",
-                                     "exitCode": 0}
-    result = env._execute_locked("true", str(tmp_path), 30, None)
+        env = _make_env(plugin, tmp_path)
+        env._request = lambda *a, **k: {"output": f"some output\n{cwd_marker}{locked}\n",
+                                        "exitCode": 0}
+        result = env._execute_locked("true", str(tmp_path), 30, None)
 
-    assert "cwd_observed" not in result, f"inaccessible cwd leaked: {result}"
-    assert env.cwd == str(tmp_path)
+        assert "cwd_observed" not in result, f"inaccessible cwd leaked: {result}"
+        assert env.cwd == str(tmp_path)
+    finally:
+        os.chmod(locked, 0o755)
 
 
 def test_cwd_marker_accepts_accessible_dir(plugin, tmp_path, monkeypatch):

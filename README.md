@@ -54,6 +54,14 @@ commands (omp's own default otherwise).
   command's spool (`tail -f` works), then holds the final output;
   `~/.hermes/omp-live/last.json` describes the last command.
 
+## Known limitation: `exit` in a command
+
+omp's shell is persistent (that's the point — env vars survive across
+commands), so a command containing a bare `exit` terminates that session
+shell; the backend detects the dead shell and respawns it, but exported env
+vars from earlier commands are lost. Use `bash -c 'exit 3'` or a subshell
+`(exit 3)` when you want a non-zero rc without killing the session.
+
 ## Troubleshooting
 
 - **`omp binary not found on PATH`** after a `hermes update`: the update can
@@ -75,9 +83,13 @@ uv venv .venv && uv pip install -p .venv/bin/python pytest
 ## Disclosure
 
 No Python dependencies, no network calls of its own. It spawns the `omp` CLI
-you installed, one long-lived process per Hermes task, and writes temp spool
-files under your scratch directory plus the `~/.hermes/omp-live/`
-observation log described above.
+you installed, one long-lived process per Hermes task; the spawned `omp`
+itself may make network calls to whatever model provider you configured for
+omp (the plugin never talks to the network directly). Besides the output
+spool it writes two more temp-file classes under your scratch dir: an omp
+`--config` overlay per env and a stdin spool when a command carries
+`stdin_data`. It also maintains the `~/.hermes/omp-live/` observation log
+described above.
 
 ## License
 
