@@ -111,7 +111,19 @@ class OmpRpcEnvironment:
         self._ready = threading.Event()
         self._process: Optional[subprocess.Popen] = None
         self._overlay_path: Optional[str] = None
-        self._spawn()
+        try:
+            self._spawn()
+        except BaseException:
+            # A failed constructor means cleanup() never runs; never leave
+            # the config overlay behind on ANY spawn failure (missing
+            # binary, exit-126 PermissionError, startup crash, no ready frame).
+            if self._overlay_path:
+                try:
+                    os.unlink(self._overlay_path)
+                except OSError:
+                    pass
+                self._overlay_path = None
+            raise
 
     # --- process lifecycle -------------------------------------------------
     def _spawn(self) -> None:
@@ -138,20 +150,18 @@ class OmpRpcEnvironment:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1, start_new_session=True,
             )
-        except FileNotFoundError as e:
-            # A wiped npm prefix (e.g. after `hermes update`) lands here. A
-            # bare FileNotFoundError at tool dispatch blinds every execution
-            # path with an opaque traceback; name the fix instead.
-            if self._overlay_path:
-                try:
-                    os.unlink(self._overlay_path)
-                except OSError:
-                    pass
-                self._overlay_path = None
+        except OSError as e:
+            # A wiped npm prefix (e.g. after `hermes update`) lands here as
+            # FileNotFoundError; a cli.ts that lost its exec bit lands here as
+            # PermissionError (exit 126). A bare OSError at tool dispatch
+            # blinds every execution path with an opaque traceback; name the
+            # fix instead.
             raise _OmpRpcError(
-                "omp binary not found on PATH — install it with "
-                "`npm install -g @oh-my-pi/pi-coding-agent bun` (then restart "
-                "the Hermes gateway: the terminal tool registers at boot)"
+                "omp binary not found or not executable on PATH — install it "
+                "with `npm install -g @oh-my-pi/pi-coding-agent bun` (if it "
+                "exists but fails with Permission denied, chmod +x its "
+                "src/cli.ts), then restart the Hermes gateway: the terminal "
+                "tool registers at boot"
             ) from e
         self._stderr_tail = []
         threading.Thread(target=_drain_stderr,
@@ -213,6 +223,10 @@ class OmpRpcEnvironment:
             return
         state = self._chunks.setdefault(cid, {"parts": {}, "count": msg.get("count")})
         if len(self._chunks) > 64:  # bound: incomplete streams must not accumulate
+            # Eviction is insertion-order; with >64 concurrent streams an
+            # in-flight one could be evicted (its waiter then times out and
+            # the command retries). Accepted: 64 concurrent >1MB streams is
+            # far beyond real use.
             for stale in list(self._chunks)[: len(self._chunks) - 64]:
                 self._chunks.pop(stale, None)
         idx, data = msg.get("index"), msg.get("data")
@@ -444,6 +458,9 @@ class OmpRpcEnvironment:
                     b64_parts.append(piece)
                     offset += len(piece)
                 truncated = offset < b64_total
+                # Known edge (accepted): a corrupt chunk whose junk chars are
+                # dropped by b64decode(validate=False) yet still decodes can
+                # slip through unflagged. Offsets prove volume, not integrity.
                 try:
                     output = base64.b64decode("".join(b64_parts)).decode("utf-8", errors="replace")
                 except Exception:
