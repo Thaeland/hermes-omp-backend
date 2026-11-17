@@ -69,6 +69,23 @@ shell; the backend detects the dead shell and respawns it, but exported env
 vars from earlier commands are lost. Use `bash -c 'exit 3'` or a subshell
 `(exit 3)` when you want a non-zero rc without killing the session.
 
+## Failure modes: when omp can't be found
+
+Hermes never auto-falls-back to another terminal backend — that is core
+policy — so this plugin fails legibly instead:
+
+- **Missing at gateway boot:** the provider's requirement check fails
+  (`omp` not on `PATH`), the gateway logs the reason with install
+  instructions, and the terminal tool is **not registered** for new
+  sessions. Chat and everything else keeps working. Fixing `omp` afterwards
+  does NOT bring the tool back in a running session — the toolset is frozen
+  at boot, so restart the gateway after repairing.
+- **Missing mid-run** (e.g. an update wiped the npm prefix while the
+  gateway was up): every terminal/file/code call fails with
+  `omp binary not found or not executable on PATH — install it with npm
+  install -g @oh-my-pi/pi-coding-agent bun ...` instead of an opaque
+  traceback, and no temp files are leaked. The gateway itself is unaffected.
+
 ## Troubleshooting
 
 - **`omp binary not found on PATH`** after a `hermes update`: the update can
