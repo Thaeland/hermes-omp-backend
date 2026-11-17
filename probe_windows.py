@@ -47,6 +47,17 @@ def check(label, fn):
         print(f"FAIL  {label}: {e!r}")
 
 
+env = None
+def cmd_shim():
+    import shutil
+    found = shutil.which("omp")
+    assert found, ("omp not on PATH — if you just installed it, open a NEW "
+                   "terminal (PATH changes don't reach already-open ones)")
+    print(f"      (omp resolved to: {found})")
+check("omp resolvable on PATH", cmd_shim)
+if failures:
+    sys.exit(1)  # nothing else is meaningful without the binary
+
 env = p.OmpRpcEnvironment(cwd=HOME, timeout=60, task_id="win-probe", model=None)
 try:
     def small():
@@ -87,13 +98,6 @@ try:
         r2 = env.execute("echo still-alive", HOME)
         assert "still-alive" in r2["output"], r2
     check("2>/dev/null cd-guard + env survives bad cwd", devnull)
-
-    def cmd_shim():
-        import shutil
-        found = shutil.which("omp")
-        assert found, "omp not on PATH"
-        print(f"      (omp resolved to: {found})")
-    check("omp resolvable on PATH", cmd_shim)
 finally:
     def teardown():
         env.cleanup()

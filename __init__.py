@@ -177,10 +177,12 @@ class OmpRpcEnvironment:
             # fix instead.
             raise _OmpRpcError(
                 "omp binary not found or not executable on PATH — install it "
-                "with `npm install -g @oh-my-pi/pi-coding-agent bun` (if it "
-                "exists but fails with Permission denied, chmod +x its "
-                "src/cli.ts), then restart the Hermes gateway: the terminal "
-                "tool registers at boot"
+                "with the official installer (curl -fsSL https://omp.sh/install"
+                " | sh, or irm https://omp.sh/install.ps1 | iex — then open a "
+                "NEW terminal) or via npm (`npm install -g "
+                "@oh-my-pi/pi-coding-agent bun`; if it exists but fails with "
+                "Permission denied, chmod +x its src/cli.ts), then restart "
+                "the Hermes gateway: the terminal tool registers at boot"
             ) from e
         self._stderr_tail = []
         threading.Thread(target=_drain_stderr,
