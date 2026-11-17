@@ -23,6 +23,13 @@ npm install -g @oh-my-pi/pi-coding-agent bun
 (`bun` is needed by omp's launcher. omp also needs a model configured —
 `~/.omp/agent/models.yml` or run `omp` once.)
 
+**omp version compatibility:** tested continuously across omp 18.4.3 →
+18.22.0 (the whole 18.x line this backend has run in production). The floor
+is omp **17.0.9**, where the RPC protocol gained the negotiated lossless
+output framing (`rpc_chunk` frames, `protocolVersion` in the ready frame)
+that this backend relies on for large outputs. Older omp versions predate
+the framing protocol and are not supported.
+
 ## Use it
 
 ```bash
