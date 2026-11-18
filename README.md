@@ -11,7 +11,7 @@ Hermes keeps its own approval guards — this is a same-host backend
 ## Install
 
 ```bash
-hermes plugins install Thaeland/hermes-omp-backend
+hermes plugins install Thaeland/oh-my-pi-terminal-backend
 ```
 
 Requires the `omp` CLI on `PATH`. Any official install method works — the

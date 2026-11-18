@@ -3,7 +3,7 @@ label: oh-my-pi terminal backend
 kind: backend
 version: 1.0.0
 author: Thaeland
-homepage: https://github.com/Thaeland/hermes-omp-backend
+homepage: https://github.com/Thaeland/oh-my-pi-terminal-backend
 description: >
   oh-my-pi (omp) terminal backend for Hermes Agent: the terminal, file and
   code tools run each Hermes task's commands through one long-lived
