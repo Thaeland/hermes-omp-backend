@@ -545,8 +545,8 @@ class OmpRpcEnvironment:
 
 
 class OmpProvider(TerminalEnvironmentProvider):
-    name = "omp"
-    display_name = "oh-my-pi (omp)"
+    name = "oh-my-pi-terminal-backend"
+    display_name = "oh-my-pi terminal backend"
     # Runs on THIS host through omp's embedded shell: same filesystem, same
     # paths — not remote, not a container; keep approval guards on.
     is_remote = False

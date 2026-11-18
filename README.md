@@ -1,4 +1,4 @@
-# oh-my-pi (omp) terminal backend for Hermes Agent
+# oh-my-pi terminal backend for Hermes Agent
 
 A terminal backend for [Hermes Agent](https://github.com/NousResearch/hermes-agent):
 Hermes's `terminal`, file and code tools run their shell commands through a
@@ -62,7 +62,7 @@ the framing protocol and are not supported.
 ## Use it
 
 ```bash
-hermes config set terminal.backend omp
+hermes config set terminal.backend oh-my-pi-terminal-backend
 systemctl --user restart hermes-gateway   # or restart your Hermes service
 ```
 
