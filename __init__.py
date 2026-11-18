@@ -65,7 +65,10 @@ def _private_makedirs(path: str) -> None:
 
 
 def _private_write(path: str, data: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_NOFOLLOW: a planted symlink (e.g. by a prompt-injected command in the
+    # very dir we manage) must not make the gateway truncate its target.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
             f.write(data)
@@ -110,18 +113,28 @@ def _child_env() -> dict:
     """
     env = {}
     for key, val in os.environ.items():
-        if key.upper() in _CHILD_ENV_ALLOW or key.startswith("LC_"):
+        # Case-sensitive on POSIX (distinct vars); case-insensitive on Windows
+        # (the env block itself is case-insensitive, casing is arbitrary).
+        probe = key.upper() if IS_WINDOWS else key
+        if probe in _CHILD_ENV_ALLOW or key.startswith("LC_"):
             env[key] = val
-    passthrough = []
+    passthrough: list = []
     if _PLUGIN_CTX is not None:
         try:
-            passthrough = _PLUGIN_CTX.get_config("env_passthrough", []) or []
+            raw = _PLUGIN_CTX.get_config("env_passthrough", []) or []
         except Exception:
-            passthrough = []
-    if isinstance(passthrough, str):
-        passthrough = [passthrough]
+            raw = []
+        if isinstance(raw, str):
+            passthrough = [raw]
+        elif isinstance(raw, (list, tuple)):
+            passthrough = [n for n in raw if isinstance(n, str)]
+        elif raw:
+            # e.g. YAML `env_passthrough: ON` parses to True — degrade to
+            # nothing passed, never brick every spawn with a TypeError.
+            logger.warning("omp backend: env_passthrough config %r is not a "
+                           "list of env var names; ignoring it", raw)
     for name in passthrough:
-        if isinstance(name, str) and name in os.environ:
+        if name in os.environ:
             env[name] = os.environ[name]
     return env
 
@@ -424,9 +437,10 @@ class OmpRpcEnvironment:
     def _publish_live(self, spool: str, command: str, cwd: str) -> None:
         """Expose the running command for observation.
 
-        ``~/.hermes/omp-live/output.log`` is a symlink to the live spool while
+        ``<hermes-home>/omp-live/output.log`` is a symlink to the live spool
+        while
         a command runs (``tail -f`` works), then a real copy of the final
-        output afterwards; ``~/.hermes/omp-live/last.json`` carries the
+        output afterwards; ``last.json`` carries the
         command, cwd, task, pid and timing.
         """
         try:
@@ -437,7 +451,9 @@ class OmpRpcEnvironment:
                     "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "status": "running"}
             _private_write(os.path.join(live, "last.json"), json.dumps(meta, indent=1))
             link = os.path.join(live, "output.log")
-            tmp_link = link + f".new.{os.getpid()}"
+            # thread ident included: two concurrent tasks in ONE gateway
+            # process share a pid and would collide on the temp name.
+            tmp_link = link + f".new.{os.getpid()}.{threading.get_ident()}"
             try:
                 os.symlink(spool, tmp_link)
                 os.replace(tmp_link, link)
@@ -465,11 +481,14 @@ class OmpRpcEnvironment:
                 pass
             meta_path = os.path.join(live, "last.json")
             meta = {}
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-            except (OSError, ValueError):
-                pass
+            # Never read through a planted symlink: an attacker-controlled
+            # target's content would be echoed back into it below.
+            if not os.path.islink(meta_path):
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                except (OSError, ValueError):
+                    pass
             meta.update({"status": "done", "exit_code": rc,
                          "duration_s": round(time.time() - started, 2)})
             _private_write(meta_path, json.dumps(meta, indent=1))
@@ -484,7 +503,11 @@ class OmpRpcEnvironment:
         cwd_marker = f"__OMPCW_{uuid.uuid4().hex[:12]}__"
         fd, spool = tempfile.mkstemp(prefix="hermes-omp-out-")
         os.close(fd)
-        b64_file = spool + ".b64"
+        # Pre-create the b64 target here (mkstemp => 0600): shell redirection
+        # would otherwise create it fresh under the inherited umask (022 ->
+        # 0644), leaving a world-readable copy of the full output in TMPDIR.
+        fd_b, b64_file = tempfile.mkstemp(prefix="hermes-omp-b64-")
+        os.close(fd_b)
         self._publish_live(spool, command, cwd)
         stdin_redir = ""
         stdin_path = None
@@ -670,9 +693,14 @@ class OmpProvider(TerminalEnvironmentProvider):
         model = None
         if _PLUGIN_CTX is not None:
             try:
-                model = _PLUGIN_CTX.get_config("model") or None
+                raw_model = _PLUGIN_CTX.get_config("model")
             except Exception:
-                model = None
+                raw_model = None
+            if isinstance(raw_model, str) and raw_model.strip():
+                model = raw_model.strip()
+            elif raw_model:
+                logger.warning("omp backend: model config %r is not a string; "
+                               "ignoring it", raw_model)
         if not model:
             model = os.environ.get("HERMES_OMP_MODEL") or None
         return OmpRpcEnvironment(cwd=cwd, timeout=timeout, task_id=task_id, model=model)

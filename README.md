@@ -75,11 +75,14 @@ Optional plugin config (in `config.yaml` under
 - `model`: pin the model omp uses for Hermes commands (omp's own default
   otherwise). The `HERMES_OMP_MODEL` env var still works as a fallback.
 - `env_passthrough`: list of environment variable NAMES (e.g.
-  `[ANTHROPIC_API_KEY]`) whose values are handed to the omp child. The omp
+  `[ANTHROPIC_API_KEY, HTTPS_PROXY, NO_PROXY, SSL_CERT_FILE]`) whose values
+  are handed to the omp child. The omp
   process — and every command the model runs through it — otherwise gets a
   minimal environment (`PATH`, `HOME`, `LANG`/`LC_*`, `TERM`, `TMPDIR`, plus
   Windows system vars), so Hermes' provider and bot credentials never reach
-  it, matching the built-in local backend's policy.
+  it, matching the built-in local backend's policy. Note this also means
+  non-secret vars omp may want — corporate `HTTPS_PROXY`, custom CA paths,
+  `XDG_CONFIG_HOME` — must be declared here too if your setup relies on them.
 
 ## How it works
 
