@@ -43,7 +43,87 @@ _READY_TIMEOUT = 30.0
 
 # Live-observation surface: output.log symlinks to the running command's
 # spool, then holds the final output; last.json describes the last command.
-_LIVE_DIR = os.path.join(os.path.expanduser("~"), ".hermes", "omp-live")
+# Lives under the ACTIVE profile's Hermes home (never a hardcoded ~), created
+# 0700 with 0600 files: it records command text and the last command's full
+# output, so it must not be world-readable.
+def _live_dir() -> str:
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home() / "omp-live")
+    except Exception:
+        home = (os.environ.get("HERMES_HOME") or "").strip() \
+            or os.path.expanduser("~/.hermes")
+        return os.path.join(home, "omp-live")
+
+
+def _private_makedirs(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _private_write(path: str, data: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        # os.open's mode only applies at creation; an already-existing file
+        # keeps its old perms — chmod pins it to 0600 either way.
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+
+
+# Plugin context, captured at register() so config-backed knobs (model,
+# env_passthrough) are readable from environment instances.
+_PLUGIN_CTX = None
+
+# Baseline allowlist for the omp child env. omp (and every command the model
+# runs through it) must NOT see Hermes' provider/bot credentials — the built-in
+# local backend strips those, and so does this backend via _child_env().
+_CHILD_ENV_ALLOW = frozenset(
+    ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG",
+     "TMPDIR", "TMP", "TEMP")
+    + (("SYSTEMROOT", "COMSPEC", "PATHEXT", "SYSTEMDRIVE", "SYSTEMNAME",
+        "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+        "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "ALLUSERSPROFILE",
+        "PROGRAMDATA", "LOCALAPPDATA", "APPDATA") if os.name == "nt" else ())
+)
+
+
+def _child_env() -> dict:
+    """Minimal environment for the omp child process.
+
+    Only the baseline allowlist (PATH/HOME/LANG/LC_*/TERM/TMPDIR + Windows
+    system vars) passes automatically; anything else — e.g. a provider API key
+    omp should use — must be user-declared in the plugin config as
+    ``env_passthrough: [NAME, ...]`` and is copied by name from os.environ.
+    """
+    env = {}
+    for key, val in os.environ.items():
+        if key.upper() in _CHILD_ENV_ALLOW or key.startswith("LC_"):
+            env[key] = val
+    passthrough = []
+    if _PLUGIN_CTX is not None:
+        try:
+            passthrough = _PLUGIN_CTX.get_config("env_passthrough", []) or []
+        except Exception:
+            passthrough = []
+    if isinstance(passthrough, str):
+        passthrough = [passthrough]
+    for name in passthrough:
+        if isinstance(name, str) and name in os.environ:
+            env[name] = os.environ[name]
+    return env
 
 # Overlay disabling omp's per-line column cap (would corrupt base64 chunks).
 # artifactSpillThreshold is also raised, though the RPC bash sink hardcodes its
@@ -161,6 +241,7 @@ class OmpRpcEnvironment:
             cwd=self.cwd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
+            env=_child_env(),  # never hand omp (or model-run commands) Hermes' secrets
         )
         if IS_WINDOWS:
             popen_kwargs["creationflags"] = (_CREATE_NEW_PROCESS_GROUP
@@ -349,13 +430,13 @@ class OmpRpcEnvironment:
         command, cwd, task, pid and timing.
         """
         try:
-            os.makedirs(_LIVE_DIR, exist_ok=True)
+            live = _live_dir()
+            _private_makedirs(live)
             meta = {"command": command[:2000], "cwd": cwd, "task_id": self.task_id,
                     "pid": self._process.pid if self._process else None,
                     "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "status": "running"}
-            with open(os.path.join(_LIVE_DIR, "last.json"), "w") as f:
-                json.dump(meta, f, indent=1)
-            link = os.path.join(_LIVE_DIR, "output.log")
+            _private_write(os.path.join(live, "last.json"), json.dumps(meta, indent=1))
+            link = os.path.join(live, "output.log")
             tmp_link = link + f".new.{os.getpid()}"
             try:
                 os.symlink(spool, tmp_link)
@@ -370,14 +451,19 @@ class OmpRpcEnvironment:
 
     def _finalize_live(self, spool: str, rc, started: float) -> None:
         try:
-            link = os.path.join(_LIVE_DIR, "output.log")
+            live = _live_dir()
+            link = os.path.join(live, "output.log")
             real = spool + ".final"
             try:
                 shutil.copyfile(spool, real)
+                try:
+                    os.chmod(real, 0o600)
+                except OSError:
+                    pass
                 os.replace(real, link)
             except OSError:
                 pass
-            meta_path = os.path.join(_LIVE_DIR, "last.json")
+            meta_path = os.path.join(live, "last.json")
             meta = {}
             try:
                 with open(meta_path) as f:
@@ -386,8 +472,7 @@ class OmpRpcEnvironment:
                 pass
             meta.update({"status": "done", "exit_code": rc,
                          "duration_s": round(time.time() - started, 2)})
-            with open(meta_path, "w") as f:
-                json.dump(meta, f, indent=1)
+            _private_write(meta_path, json.dumps(meta, indent=1))
         except OSError:
             pass
 
@@ -574,16 +659,26 @@ class OmpProvider(TerminalEnvironmentProvider):
         return [
             "Install omp:  npm install -g @oh-my-pi/pi-coding-agent bun",
             "Configure a model: ~/.omp/agent/models.yml (omp.sh/docs) or run `omp` once.",
-            "Optional: set HERMES_OMP_MODEL to pin the model for Hermes commands.",
+            "Optional plugin config: `model` to pin a model for Hermes commands,",
+            "`env_passthrough: [NAME, ...]` to let named env vars reach the omp child.",
         ]
 
     def create_environment(self, *, cwd: str, timeout: int, task_id: str = "default",
                            image: Optional[str] = None,
                            container_config: Optional[Dict[str, Any]] = None,
                            **kwargs: Any):
-        model = os.environ.get("HERMES_OMP_MODEL") or None
+        model = None
+        if _PLUGIN_CTX is not None:
+            try:
+                model = _PLUGIN_CTX.get_config("model") or None
+            except Exception:
+                model = None
+        if not model:
+            model = os.environ.get("HERMES_OMP_MODEL") or None
         return OmpRpcEnvironment(cwd=cwd, timeout=timeout, task_id=task_id, model=model)
 
 
 def register(ctx):
+    global _PLUGIN_CTX
+    _PLUGIN_CTX = ctx
     ctx.register_terminal_environment_provider(OmpProvider())

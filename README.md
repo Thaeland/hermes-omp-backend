@@ -69,8 +69,17 @@ systemctl --user restart hermes-gateway   # or restart your Hermes service
 The terminal tool registers at gateway boot, so a restart is required after
 installing or after making `omp` resolvable on `PATH`.
 
-Optional: set `HERMES_OMP_MODEL` to pin the model omp uses for Hermes
-commands (omp's own default otherwise).
+Optional plugin config (in `config.yaml` under
+`plugins.entries.oh-my-pi-terminal-backend.config`):
+
+- `model`: pin the model omp uses for Hermes commands (omp's own default
+  otherwise). The `HERMES_OMP_MODEL` env var still works as a fallback.
+- `env_passthrough`: list of environment variable NAMES (e.g.
+  `[ANTHROPIC_API_KEY]`) whose values are handed to the omp child. The omp
+  process — and every command the model runs through it — otherwise gets a
+  minimal environment (`PATH`, `HOME`, `LANG`/`LC_*`, `TERM`, `TMPDIR`, plus
+  Windows system vars), so Hermes' provider and bot credentials never reach
+  it, matching the built-in local backend's policy.
 
 ## How it works
 
@@ -87,9 +96,11 @@ commands (omp's own default otherwise).
   and transfers it as base64 chunks (first chunk inline, remainder read back
   in shell slices via `tail -c +N | head -c M`); a `--config` overlay
   disables the column cap for the session.
-- Live observation: `~/.hermes/omp-live/output.log` symlinks to the running
-  command's spool (`tail -f` works), then holds the final output;
-  `~/.hermes/omp-live/last.json` describes the last command.
+- Live observation: `<hermes-home>/omp-live/output.log` (the ACTIVE profile's
+  Hermes home, via `get_hermes_home()`) symlinks to the running command's
+  spool (`tail -f` works), then holds the final output; `last.json` describes
+  the last command. The directory is created 0700 and its files are written
+  0600 — it records command text and output, so it stays private.
 
 ## Known limitation: `exit` in a command
 
@@ -137,13 +148,15 @@ uv venv .venv && uv pip install -p .venv/bin/python pytest
 ## Disclosure
 
 No Python dependencies, no network calls of its own. It spawns the `omp` CLI
-you installed, one long-lived process per Hermes task; the spawned `omp`
-itself may make network calls to whatever model provider you configured for
-omp (the plugin never talks to the network directly). Besides the output
-spool it writes two more temp-file classes under your scratch dir: an omp
-`--config` overlay per env and a stdin spool when a command carries
-`stdin_data`. It also maintains the `~/.hermes/omp-live/` observation log
-described above.
+you installed, one long-lived process per Hermes task, with a MINIMAL child
+environment (baseline vars only; extra names pass only if you declare them in
+`env_passthrough`) so Hermes' own credentials never reach the child; the
+spawned `omp` itself may make network calls to whatever model provider you
+configured for omp (the plugin never talks to the network directly). Besides
+the output spool it writes two more temp-file classes under your scratch dir:
+an omp `--config` overlay per env and a stdin spool when a command carries
+`stdin_data`. It also maintains the `<hermes-home>/omp-live/` observation log
+described above (0700 dir, 0600 files).
 
 ## License
 

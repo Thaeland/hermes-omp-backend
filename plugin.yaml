@@ -16,7 +16,8 @@ description: >
   (`npm install -g @oh-my-pi/pi-coding-agent bun`), spawns one long-lived
   `omp --mode rpc` process per Hermes task, and spools command output, a
   per-env config overlay and optional stdin through temp files under your
-  scratch directory (plus a live-observation log at `~/.hermes/omp-live/`)
+  scratch directory (plus a private live-observation log under your Hermes
+  home's `omp-live/`, 0700/0600)
   so large outputs survive intact.
 requires_hermes: ">=0.21.6"
 provides_tools: []
