@@ -21,6 +21,9 @@ plugin speaks omp's RPC protocol (≥ 17.0.9), not npm:
 # official installer (macOS/Linux) — self-contained, no bun needed
 curl -fsSL https://omp.sh/install | sh
 
+# official installer (Windows, PowerShell)
+irm https://omp.sh/install.ps1 | iex
+
 # or via npm/bun (needs bun reachable for the launcher, and postinstall
 # scripts allowed: npm i -g --allow-scripts=omp,bun @oh-my-pi/pi-coding-agent bun)
 npm install -g @oh-my-pi/pi-coding-agent bun
@@ -36,9 +39,15 @@ Two PATH caveats:
   instruction fixes your interactive shell, not the service — make sure the
   directory holding `omp` is on the *service's* PATH (a symlink into
   `~/.local/bin` is the robust fix), then restart the gateway.
-- **Windows:** not supported. The command wrapper assumes a POSIX shell
-  (`bash`, `dd`, `base64 -w0`). macOS is untested and needs GNU coreutils
-  (`base64 -w0` is GNU-only); Linux is the tested platform.
+- **Windows:** supported — verified on Windows 11 Pro with the official
+  installer (`irm https://omp.sh/install.ps1 | iex`, omp 18.22.1) via
+  `probe_windows.py` (all checks pass: spawn, lossless chunking, env/cwd
+  persistence, spool slicing, `2>/dev/null`). The wrapper uses `tail`/`head`
+  from omp's own shell (no `dd`), resolves npm `.cmd` shims via `cmd /c`,
+  and tears the process tree down with `taskkill`. After installing, open a
+  NEW terminal — PATH changes don't reach already-open ones.
+  macOS is untested and needs GNU coreutils (`base64 -w0` is GNU-only);
+  Linux is the primary platform.
 
 omp also needs a model configured — `~/.omp/agent/models.yml`, provider
 sign-in, or run `omp` once interactively.
@@ -75,8 +84,9 @@ commands (omp's own default otherwise).
   unreadable path (e.g. `/root`) can never poison the session cwd.
 - omp's RPC sink caps inline output (50 KB, 512 columns). To stay lossless
   for Hermes file-tool reads, every command spools its output to a temp file
-  and transfers it as base64 chunks (first chunk inline, remainder via `dd`
-  reads); a `--config` overlay disables the column cap for the session.
+  and transfers it as base64 chunks (first chunk inline, remainder read back
+  in shell slices via `tail -c +N | head -c M`); a `--config` overlay
+  disables the column cap for the session.
 - Live observation: `~/.hermes/omp-live/output.log` symlinks to the running
   command's spool (`tail -f` works), then holds the final output;
   `~/.hermes/omp-live/last.json` describes the last command.
